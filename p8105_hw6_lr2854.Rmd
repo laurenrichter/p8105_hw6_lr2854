@@ -6,14 +6,24 @@ output: github_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = TRUE, collapse = TRUE)
 
 library(tidyverse)
+
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, collapse = TRUE)
+
+inline_reformat = function(x) {
+    ifelse(is.numeric(x), 
+                     x, 
+                     paste0("`", x, "`", collapse = ", ")) 
+}
+
+knitr::knit_hooks$set(inline = inline_reformat)
+
 ```
 
 ## Problem 1
 
-In this problem, you will analyze data gathered to understand the effects of several variables on a child’s birthweight. This dataset, available here, consists of roughly 4000 children and includes the following variables:
+For the birthweight data set, a brief data dictionary is below:
 
 - `babysex`: baby’s sex (male = 1, female = 2)
 - `bhead`: baby’s head circumference at birth (centimeters)
@@ -37,23 +47,136 @@ In this problem, you will analyze data gathered to understand the effects of sev
 - `wtgain`: mother’s weight gain during pregnancy (pounds)
 
 
-```{r load_data, collapse=TRUE}
+```{r load_data, collapse = TRUE}
 bw_data = read_csv("data/birthweight.csv") %>%
   janitor::clean_names("snake") %>%
   mutate(babysex = as_factor(babysex),
          frace = as_factor(frace), 
-         mrace = as_factor(mrace))
+         mrace = as_factor(mrace)) %>%
+  mutate(babysex = recode_factor(babysex, 
+                                 "1" = "male", 
+                                 "2" = "female"),
+         frace = recode_factor(frace, 
+                               "1" = "White", 
+                               "2" = "Black", 
+                               "3" = "Asian", 
+                               "4" = "Puerto Rican", 
+                               "8" = "Other", 
+                               "9" = "Unknown"),
+         mrace = recode_factor(mrace, 
+                               "1" = "White", 
+                               "2" = "Black", 
+                               "3" = "Asian", 
+                               "4" = "Puerto Rican", 
+                               "8" = "Other"))
 
-# check for the number of missing variables using sum(is.na(bw_data))
+elim_cols = bw_data %>% 
+  select(where(~n_distinct(.) == 1)) %>%
+  colnames()
+
+bw_data = bw_data %>%
+  select(where(~n_distinct(.) > 1))
+
+#skimr::skim(bw_data)
+
+# check for the number of missing variables using
+# sum(is.na(bw_data))
 ```
 
-Data tidying involved name cleaning, variable conversion, and checking for missing data.  Variable names were cleaned to ensure they were consistent (using snake case, although because of the initial formatting of variables, snake case resulted only in lowercase variable names sans underscores). The variables `babysex`,`frace`, and `mrace` were converted from numeric to factor variables. There were `r sum(is.na(bw_data))` missing variables in the data set.  
+Data tidying involved name cleaning, variable conversion, and checking for missing data.  Variable names were cleaned to ensure they were consistent. The variables `r bw_data %>% select(where(is.factor)) %>% names()` were converted from numeric to factor variables. Variables with only one unique value were removed from analysis: `r elim_cols`. There were `r sum(is.na(bw_data))` missing variables in the data set.  
 
-A regression model for birthweight
+```{r build_mod_1}
 
-```{r bw_model}
+# build a linear model with everything except wtgain
+all_vars_mod = lm(bwt ~ . -wtgain, data = bw_data)
 
-# value = sex, head, length, GA, malform, pnumlbw pnumsga smoken wtgain
+# get r2 value
+all_vars_mod_r2 = all_vars_mod %>%
+  broom::glance() %>%
+  pull(adj.r.squared)
+
+# select only vars with effect size > 10 g and p < 0.05
+# also select smoking status and maternal race
+
+incl_vars = all_vars_mod %>%
+  broom::tidy() %>%
+  select(term, estimate, p.value) %>% 
+  filter(
+    ((abs(estimate) >= 10) & (p.value <= 0.05) & (term != "(Intercept)")) 
+    | (grepl("mrace", term))
+    | grepl("smoken", term)) %>%
+  pull(term) %>%
+  str_replace(.,"mrace.*", "mrace") %>%
+  str_replace(.,"babysex.*","babysex") %>%
+  unique()
+
+data_df = bw_data %>%
+  select(bwt, incl_vars)
+
+data_df
+
+```
+
+To build the proposed model, first, knowledge of variables known to correlate well with birth weight were included: baby's sex assigned at birth (`babysex`), birth length (`blength`), birth head circumference (`bhead`), gestational age (`gaweeks`), and maternal smoking status (`smoken`).
+
+In order to support these hypothesized variables with a data-driven approach, all variables except for `wtgain` (due to expected colinearity with `delwt` and `ppwt`) were examined in a linear model to determine the effect size and p-values of the estimates. These remaining variables explain ~`r as.double(format(all_vars_mod_r2*100, nsmall = 1, digits = 3))`% of the variance in the birth weights.
+
+Next, variables were filtered to only include those with absolute effect sizes >= 10 grams and p-values < 0.05. The previously declared variables were included in this list except for `smoken`, the exclusion of which may be due to the relative infrequency in smoking (~25% of the cohort smoked daily). The variable `parity` had low variance (~`r var(bw_data$parity)`) but was included. Maternal race (`mrace`) was added to the list of variables in the proposed model.
+
+The final variables included in the proposed model were `r incl_vars`.
+
+Many of the variables did not have a linear relationship, and the relationship varied depending on sex and race (see sanity check below). As such, a GAM was used to model the relationships.
+
+```{r var_rels}
+
+data_df %>%
+  ggplot(aes(x = blength, y = bwt, color = mrace)) + 
+  geom_point(alpha = 0.5) + 
+  facet_wrap(~babysex)
+
+data_df %>%
+  ggplot(aes(x = gaweeks, y = bwt, color = mrace)) + 
+  geom_point(alpha = 0.5) + 
+  facet_wrap(~babysex)
+```
+
+
+After variable selection, the data were split into training and test sets (using 80/20 rule).
+
+```{r bw_model3}
+# bwt = babysex, blength, bhead, gaweeks, smoken, mrace, parity
+
+train_df = sample_n(data_df, 80)
+test_df = anti_join(train_df, data_df)
+
+bw_gam_model = mgcv::gam(bwt ~ s(blength) + s(bhead, k = 6) + s(gaweeks) + s(smoken, k = 3) + babysex + mrace + parity, data = train_df, select = TRUE)
+# parity is not in a spline function because of the very low variance indicating only a handful of observations have distinct data
+
+bw_gam_model %>%
+  broom::tidy()
+```
+
+
+
+```{r}
+bw_lin_model = lm(bwt ~ babysex + blength + bhead + gaweeks + mrace + parity + smoken, data = bw_data)
+
+bw_model %>%
+  broom::glance()
+
+bw_model %>%
+  broom::tidy() %>%
+  select(term, estimate, p.value) %>% 
+  knitr::kable(digits = 3)
+
+
+modelr::add_residuals(bw_data, bw_model) %>%
+  ggplot(aes(x = mrace, y = resid)) + geom_violin()
+
+modelr::add_residuals(bw_data, bw_model) %>%
+  ggplot(aes(x = blength, y = resid)) + geom_point()
+
+modelr::add_predictions(bw_data, bw_model)
 
 ```
 
@@ -65,15 +188,45 @@ Compare your model to two others:
 One using length at birth and gestational age as predictors (main effects only)
 
 ```{r length_v_ga}
-# value = B*length + C*GA
+# bwt = B*length + C*GA
 ```
 
 One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
 
 ```{r hc_length_sex}
-# value = B*hc + C*length + D*sex + E*hc*length*sex + F*hc*length + G*hc*sex + H*length*sex
+# bwt = B*hc + C*length + D*sex + E*hc*length*sex + F*hc*length + G*hc*sex + H*length*sex
 ```
 Make this comparison in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
 
 Note that although we expect your model to be reasonable, model building itself is not a main idea of the course and we don’t necessarily expect your model to be “optimal”.
+
+## Problem 2
+
+For this problem, we’ll use the 2017 Central Park weather data that we’ve seen elsewhere. The code chunk below (adapted from the course website) will download these data.
+
+```{r weather}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+The boostrap is helpful when you’d like to perform inference for a parameter / value / summary that doesn’t have an easy-to-write-down distribution in the usual repeated sampling framework. We’ll focus on a simple linear regression with `tmax` as the response and `tmin` as the predictor, and are interested in the distribution of two quantities estimated from these data:
+
+r̂2
+log(β̂0∗β̂1)
+
+Use 5000 bootstrap samples and, for each bootstrap sample, produce estimates of these two quantities. Plot the distribution of your estimates, and describe these in words. Using the 5000 bootstrap estimates, identify the 2.5% and 97.5% quantiles to provide a 95% confidence interval for r̂2
+ and log(β̂0∗β̂1)
+. Note: `broom::glance()` is helpful for extracting r̂2
+ from a fitted regression, and `broom::tidy()` (with some additional wrangling) should help in computing log(β̂0∗β̂1)
+.
+
 
