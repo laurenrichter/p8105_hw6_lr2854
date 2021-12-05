@@ -295,16 +295,19 @@ weather_df =
 ```
 
 
-The values of $\hat r^2$ and $log(\beta_0*\beta_1)$ were pulled and calculated by unnesting the `broom::glance()` and `broom::tidy()` functions, respectively. These were plotted with the resulting densities demonstrating that the sample approximates a normal distribution (mean $\approx$ median). 
+The values of $\hat r^2$ and $log(\hat\beta_0*\hat\beta_1)$ were pulled and calculated by unnesting the `broom::glance()` and `broom::tidy()` functions, respectively. 
+
+These were plotted with the resulting densities demonstrating that the two values are not quite normally distributed (mean $\approx$ median)-- the distribution of $\hat r^2$ has a left skew and the distribution of $log(\hat\beta_0*\hat\beta_1)$ has a notch (perhaps bimodal). However, because the bootstrapping process is random, the distribution will change slightly every time the code is run.
 
 The following equation was embedded in a function to calculate the 2.5% and 97.5%iles to generate a 95% confidence interval for each variable:
 
 $\bar X \pm {t_{(\alpha /2),df_{(N-1)}}}{S_{\bar X}}$
 
-where ${S_{\bar X}} = \frac{s}{{\sqrt N }}$ (standard error)
+where the standard error is:
 
+${S_{\bar X}} = \frac{s}{{\sqrt N }}$
 
-```{r boot1}
+```{r boot1, collapse = TRUE}
 
 # let's make some functions to calculate stats
 
@@ -323,9 +326,8 @@ get_ci = function (x, pct_conf = 95) {
   low_quant = mean_ - (t_*se_)
   high_quant = mean_ + (t_*se_)
   results_ = c(as.integer(pct_conf), mean_, low_quant, high_quant)
-  res_info = names(results_) <- c("% Confidence", "Mean", paste0((100-pct_conf)/2, "%ile"), paste0(100-((100-pct_conf)/2), "%ile"))
-  results_tibble = tibble(res_info = results_)
-  return(results_tibble)
+  names(results_) = c("% Confidence", "Mean", paste0((100-pct_conf)/2, "%ile"), paste0(100-((100-pct_conf)/2), "%ile"))
+  return(results_)
 }
 
 boot_df = weather_df %>% 
@@ -345,8 +347,12 @@ boot_df = weather_df %>%
   select(r_squared, log_b0_b1)
 
 ci_calcs = boot_df %>% 
-  sapply(get_ci)
-  
+  sapply(get_ci) %>%
+  t() %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column("Estimate") %>%
+  mutate(Estimate = str_replace(Estimate, pattern = "log_b0_b1", replacement = "log(beta0*beta1)"))
+
 r2_dens = boot_df %>%
   ggplot(aes(x=r_squared)) + geom_density(alpha = 0.5, fill = "blue") +
   geom_vline(aes(xintercept=mean(r_squared)),
@@ -367,16 +373,18 @@ logb_dens = boot_df %>%
             color="red", linetype="solid", size=0.5) +
   geom_vline(aes(xintercept=median(log_b0_b1)), show.legend = TRUE,
             color="darkred", linetype="dashed", size=0.5) +
-  labs(y = "Density", x = expression(log(beta[0]%*%beta[1]))) +
+  labs(y = "Density", x = expression(log(hat(beta[0])%*%hat(beta[1])))) +
   scale_color_manual(name = '', 
                      labels = c(mean = 'Mean', median = 'Median'),
                      values = c(mean = 'black', median = 'black')) +
   guides(color = guide_legend(override.aes = list(linetype = c('solid','dashed'))),
          linetype = none)
 
-print(ci_calcs)
-r2_dens + logb_dens
 
+ci_calcs %>%
+  knitr::kable(digits = 5)
+
+r2_dens / logb_dens
 
 ```
 
