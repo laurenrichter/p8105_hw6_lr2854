@@ -303,10 +303,6 @@ The following equation was embedded in a function to calculate the 2.5% and 97.5
 
 $\bar X \pm {t_{(\alpha /2),df_{(N-1)}}}{S_{\bar X}}$
 
-where the standard error is:
-
-${S_{\bar X}} = \frac{s}{{\sqrt N }}$
-
 ```{r boot1, collapse = TRUE}
 
 # let's make some functions to calculate stats
