@@ -8,6 +8,9 @@ output: github_document
 ```{r setup, include=FALSE}
 
 library(tidyverse)
+library(patchwork)
+library(modelr)
+library(mgcv)
 
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, collapse = TRUE)
 
@@ -18,7 +21,6 @@ inline_reformat = function(x) {
 }
 
 knitr::knit_hooks$set(inline = inline_reformat)
-
 ```
 
 ## Problem 1
@@ -48,7 +50,7 @@ For the birthweight data set, a brief data dictionary is below:
 
 
 ```{r load_data, collapse = TRUE}
-bw_data = read_csv("data/birthweight.csv") %>%
+bw_data_df = read_csv("data/birthweight.csv") %>%
   janitor::clean_names("snake") %>%
   mutate(babysex = as_factor(babysex),
          frace = as_factor(frace), 
@@ -70,25 +72,25 @@ bw_data = read_csv("data/birthweight.csv") %>%
                                "4" = "Puerto Rican", 
                                "8" = "Other"))
 
-elim_cols = bw_data %>% 
+elim_cols = bw_data_df %>% 
   select(where(~n_distinct(.) == 1)) %>%
   colnames()
 
-bw_data = bw_data %>%
+bw_data_df = bw_data_df %>%
   select(where(~n_distinct(.) > 1))
 
-#skimr::skim(bw_data)
+#skimr::skim(bw_data_df)
 
 # check for the number of missing variables using
-# sum(is.na(bw_data))
+# sum(is.na(bw_data_df))
 ```
 
-Data tidying involved name cleaning, variable conversion, and checking for missing data.  Variable names were cleaned to ensure they were consistent. The variables `r bw_data %>% select(where(is.factor)) %>% names()` were converted from numeric to factor variables. Variables with only one unique value were removed from analysis: `r elim_cols`. There were `r sum(is.na(bw_data))` missing variables in the data set.  
+Data tidying involved name cleaning, variable conversion, and checking for missing data.  Variable names were cleaned to ensure they were consistent. The variables `r bw_data_df %>% select(where(is.factor)) %>% names()` were converted from numeric to factor variables. Variables with only one unique value were removed from analysis: `r elim_cols`. There were `r sum(is.na(bw_data_df))` missing variables in the data set.  
 
 ```{r build_mod_1}
 
 # build a linear model with everything except wtgain
-all_vars_mod = lm(bwt ~ . -wtgain, data = bw_data)
+all_vars_mod = lm(bwt ~ . -wtgain, data = bw_data_df)
 
 # get r2 value
 all_vars_mod_r2 = all_vars_mod %>%
@@ -102,7 +104,10 @@ incl_vars = all_vars_mod %>%
   broom::tidy() %>%
   select(term, estimate, p.value) %>% 
   filter(
-    ((abs(estimate) >= 10) & (p.value <= 0.05) & (term != "(Intercept)")) 
+    ((abs(estimate) >= 100) & (p.value <= 0.05) & (term != "(Intercept)"))
+    | (grepl("babysex", term)) 
+    | (grepl("blength", term))
+    | (grepl("gaweeks", term))
     | (grepl("mrace", term))
     | grepl("smoken", term)) %>%
   pull(term) %>%
@@ -110,99 +115,170 @@ incl_vars = all_vars_mod %>%
   str_replace(.,"babysex.*","babysex") %>%
   unique()
 
-data_df = bw_data %>%
-  select(bwt, incl_vars)
-
-data_df
-
 ```
 
-To build the proposed model, first, knowledge of variables known to correlate well with birth weight were included: baby's sex assigned at birth (`babysex`), birth length (`blength`), birth head circumference (`bhead`), gestational age (`gaweeks`), and maternal smoking status (`smoken`).
+To build the proposed model, first, knowledge of variables known to correlate with birth weight were included: baby's sex assigned at birth (`babysex`), birth length (`blength`), birth head circumference (`bhead`), gestational age (`gaweeks`), and maternal smoking status (`smoken`).
 
 In order to support these hypothesized variables with a data-driven approach, all variables except for `wtgain` (due to expected colinearity with `delwt` and `ppwt`) were examined in a linear model to determine the effect size and p-values of the estimates. These remaining variables explain ~`r as.double(format(all_vars_mod_r2*100, nsmall = 1, digits = 3))`% of the variance in the birth weights.
 
-Next, variables were filtered to only include those with absolute effect sizes >= 10 grams and p-values < 0.05. The previously declared variables were included in this list except for `smoken`, the exclusion of which may be due to the relative infrequency in smoking (~25% of the cohort smoked daily). The variable `parity` had low variance (~`r var(bw_data$parity)`) but was included. Maternal race (`mrace`) was added to the list of variables in the proposed model.
+Next, variables were filtered to only include those with absolute effect sizes >= 100 grams and p-values < 0.05. Variables that are reported to correlate with birth weight but did not meet these criteria were excluded, with the exception of `babysex`, which was included as a modifier.
 
 The final variables included in the proposed model were `r incl_vars`.
 
-Many of the variables did not have a linear relationship, and the relationship varied depending on sex and race (see sanity check below). As such, a GAM was used to model the relationships.
+Although many of the variables may not have a linear relationship, and the relationship seems to vary by sex and maternal race (see below), to reduce complexity, a generalized linear model was used.
 
 ```{r var_rels}
 
-data_df %>%
-  ggplot(aes(x = blength, y = bwt, color = mrace)) + 
+hc_v_wt_plt = bw_data_df %>%
+  ggplot(aes(x = bhead, y = bwt, color = mrace)) + 
   geom_point(alpha = 0.5) + 
   facet_wrap(~babysex)
 
-data_df %>%
+ga_v_wt_plt = bw_data_df %>%
   ggplot(aes(x = gaweeks, y = bwt, color = mrace)) + 
   geom_point(alpha = 0.5) + 
   facet_wrap(~babysex)
+
+hc_v_wt_plt / ga_v_wt_plt
 ```
 
+After variable selection, the data were split into training and test sets (using 80/20 rule) to train a simple linear model. Select residuals are plotted below showing that the model does not appear to have a constant error for each variable, which is expected given that many of the variables are not linearly related. Plotting predictions of birth weight vs. birth head circumference (red, bottom panel) reveals overfitting in that the error increases at lower head circumferences.
 
-After variable selection, the data were split into training and test sets (using 80/20 rule).
+```{r bw_mod}
 
-```{r bw_model3}
-# bwt = babysex, blength, bhead, gaweeks, smoken, mrace, parity
+# bwt = f(babysex, blength, bhead, gaweeks, smoken, mrace)
 
-train_df = sample_n(data_df, 80)
-test_df = anti_join(train_df, data_df)
+train_df = sample_n(bw_data_df, round(nrow(bw_data_df)*0.8))
+test_df = anti_join(bw_data_df, train_df)
 
-bw_gam_model = mgcv::gam(bwt ~ s(blength) + s(bhead, k = 6) + s(gaweeks) + s(smoken, k = 3) + babysex + mrace + parity, data = train_df, select = TRUE)
-# parity is not in a spline function because of the very low variance indicating only a handful of observations have distinct data
+bw_mod = glm(bwt ~ babysex + blength + bhead + gaweeks + smoken + babysex*gaweeks*mrace, data = train_df)
 
-bw_gam_model %>%
-  broom::tidy()
-```
-
-
-
-```{r}
-bw_lin_model = lm(bwt ~ babysex + blength + bhead + gaweeks + mrace + parity + smoken, data = bw_data)
-
-bw_model %>%
-  broom::glance()
-
-bw_model %>%
-  broom::tidy() %>%
-  select(term, estimate, p.value) %>% 
-  knitr::kable(digits = 3)
-
-
-modelr::add_residuals(bw_data, bw_model) %>%
+resid_mrace_bw = modelr::add_residuals(train_df, bw_mod) %>%
   ggplot(aes(x = mrace, y = resid)) + geom_violin()
 
-modelr::add_residuals(bw_data, bw_model) %>%
+resid_sex_bw = modelr::add_residuals(train_df, bw_mod) %>%
+  ggplot(aes(x = babysex, y = resid)) + geom_violin()
+
+resid_ga_bw = modelr::add_residuals(train_df, bw_mod) %>%
+  ggplot(aes(x = gaweeks, y = resid)) + geom_point()
+
+resid_len_bw = modelr::add_residuals(train_df, bw_mod) %>%
   ggplot(aes(x = blength, y = resid)) + geom_point()
 
-modelr::add_predictions(bw_data, bw_model)
+train_pred_bw = train_df %>%
+  add_predictions(bw_mod) %>%
+  ggplot(aes(x = bhead, y = bwt)) + geom_point() + 
+  geom_smooth(aes(y = pred), color = "red")
 
+((resid_mrace_bw + resid_sex_bw) / (resid_ga_bw + resid_len_bw)) / train_pred_bw
 ```
 
-
-Propose a regression model for birthweight. This model may be based on a hypothesized structure for the factors that underly birthweight, on a data-driven model-building process, or a combination of the two. Describe your modeling process and show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
-
-Compare your model to two others:
-
-One using length at birth and gestational age as predictors (main effects only)
+Compared to a linear model including only main effects of birth length and gestational age, the difference in residuals is statistically significant, with the more complex model having a lower residual sum of squares (RSS).
 
 ```{r length_v_ga}
-# bwt = B*length + C*GA
+
+# nested model
+# bwt = f(blength, gaweeks)
+
+lvg_mod = lm(bwt ~ blength + gaweeks, data = train_df)
+
+anova(lvg_mod, bw_mod) %>% 
+  broom::tidy()
+
+resid_mrace_lvg = modelr::add_residuals(train_df, lvg_mod) %>%
+  ggplot(aes(x = mrace, y = resid)) + geom_violin()
+
+resid_ga_lvg = modelr::add_residuals(train_df, lvg_mod) %>%
+  ggplot(aes(x = gaweeks, y = resid)) + geom_point()
+
+resid_sex_lvg = modelr::add_residuals(train_df, lvg_mod) %>%
+  ggplot(aes(x = babysex, y = resid)) + geom_violin()
+
+resid_len_lvg = modelr::add_residuals(train_df, lvg_mod) %>%
+  ggplot(aes(x = blength, y = resid)) + geom_point()
+
+train_pred_lvg = train_df %>%
+  add_predictions(lvg_mod) %>%
+  ggplot(aes(x = bhead, y = bwt)) + geom_point() + 
+  geom_smooth(aes(y = pred), color = "red")
+
+((resid_mrace_lvg + resid_sex_lvg) / (resid_ga_lvg + resid_len_lvg)) / train_pred_lvg
+
 ```
 
-One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+Compared to another model using head circumference, length, sex, and all interactions (including the three-way interaction), the proposed model also appears to perform better with a lower RMSE.
 
 ```{r hc_length_sex}
-# bwt = B*hc + C*length + D*sex + E*hc*length*sex + F*hc*length + G*hc*sex + H*length*sex
-```
-Make this comparison in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
+# bwt = f(hc, length, sex, hc*length, hc*sex, length*sex, hc*length*sex)
 
-Note that although we expect your model to be reasonable, model building itself is not a main idea of the course and we don’t necessarily expect your model to be “optimal”.
+hc_mixed_mod = lm(bwt ~ bhead*babysex*blength, data = train_df)
+
+resid_mrace_hc = modelr::add_residuals(train_df, hc_mixed_mod) %>%
+  ggplot(aes(x = mrace, y = resid)) + geom_violin()
+
+resid_ga_hc = modelr::add_residuals(train_df, hc_mixed_mod) %>%
+  ggplot(aes(x = gaweeks, y = resid)) + geom_point()
+
+resid_sex_hc = modelr::add_residuals(train_df, hc_mixed_mod) %>%
+  ggplot(aes(x = babysex, y = resid)) + geom_violin()
+
+resid_len_hc = modelr::add_residuals(train_df, hc_mixed_mod) %>%
+  ggplot(aes(x = blength, y = resid)) + geom_point()
+
+train_pred_hc = train_df %>%
+  add_predictions(hc_mixed_mod) %>%
+  ggplot(aes(x = bhead, y = bwt)) + geom_point() + 
+  geom_smooth(aes(y = pred), color = "red")
+
+((resid_mrace_hc + resid_sex_hc) / (resid_ga_hc + resid_len_hc)) / train_pred_hc
+```
+
+Comparing all three linear models side by side using cross validation demonstrates the slightly improved performance of the proposed model compared to the simplified models with respect to RMSE.
+
+``` {r all_three}
+
+train_pred_all = train_df %>% 
+  gather_predictions(bw_mod, lvg_mod, hc_mixed_mod) %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = bhead, y = bwt)) + 
+  geom_point(alpha = .5) +
+  geom_smooth(aes(y = pred), color = "red") + 
+  facet_grid(~model)
+
+cv_df =
+  crossv_mc(bw_data_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble))
+
+cv_df = 
+  cv_df %>% 
+  mutate(
+    bw_mod = map(train, ~glm(bwt ~ babysex + blength + bhead + gaweeks + smoken + babysex*gaweeks*mrace, data = .x)),
+    lvg_mod = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    hc_mixed_mod= map(train, ~lm(bwt ~ bhead*babysex*blength, data = .x))) %>% 
+  mutate(
+    rmse_bw = map2_dbl(bw_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_lvg = map2_dbl(lvg_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_hc = map2_dbl(hc_mixed_mod, test, ~rmse(model = .x, data = .y)))
+
+cv_plot = cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+
+train_pred_all / cv_plot
+```
+
 
 ## Problem 2
 
-For this problem, we’ll use the 2017 Central Park weather data that we’ve seen elsewhere. The code chunk below (adapted from the course website) will download these data.
+As previously stated, the code below will download 2017 Central Park weather data.
 
 ```{r weather}
 weather_df = 
@@ -218,15 +294,89 @@ weather_df =
   select(name, id, everything())
 ```
 
-The boostrap is helpful when you’d like to perform inference for a parameter / value / summary that doesn’t have an easy-to-write-down distribution in the usual repeated sampling framework. We’ll focus on a simple linear regression with `tmax` as the response and `tmin` as the predictor, and are interested in the distribution of two quantities estimated from these data:
 
-r̂2
-log(β̂0∗β̂1)
+The values of $\hat r^2$ and $log(\beta_0*\beta_1)$ were pulled and calculated by unnesting the `broom::glance()` and `broom::tidy()` functions, respectively. These were plotted with the resulting densities demonstrating that the sample approximates a normal distribution (mean $\approx$ median). 
 
-Use 5000 bootstrap samples and, for each bootstrap sample, produce estimates of these two quantities. Plot the distribution of your estimates, and describe these in words. Using the 5000 bootstrap estimates, identify the 2.5% and 97.5% quantiles to provide a 95% confidence interval for r̂2
- and log(β̂0∗β̂1)
-. Note: `broom::glance()` is helpful for extracting r̂2
- from a fitted regression, and `broom::tidy()` (with some additional wrangling) should help in computing log(β̂0∗β̂1)
-.
+The following equation was embedded in a function to calculate the 2.5% and 97.5%iles to generate a 95% confidence interval for each variable:
 
+$\bar X \pm {t_{(\alpha /2),df_{(N-1)}}}{S_{\bar X}}$
+
+where ${S_{\bar X}} = \frac{s}{{\sqrt N }}$ (standard error)
+
+
+```{r boot1}
+
+# let's make some functions to calculate stats
+
+std_error = function (x) {
+  sd(x)/sqrt(length(x))
+}
+
+# calculate the confidence interval
+
+get_ci = function (x, pct_conf = 95) {
+  mean_ = mean(x)
+  se_ = std_error(x)
+  alpha_ = 1-(pct_conf/100)
+  df_ = length(x) - 1
+  t_ = qt(p = alpha_/2, df = df_)
+  low_quant = mean_ - (t_*se_)
+  high_quant = mean_ + (t_*se_)
+  results_ = c(as.integer(pct_conf), mean_, low_quant, high_quant)
+  res_info = names(results_) <- c("% Confidence", "Mean", paste0((100-pct_conf)/2, "%ile"), paste0(100-((100-pct_conf)/2), "%ile"))
+  results_tibble = tibble(res_info = results_)
+  return(results_tibble)
+}
+
+boot_df = weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x)),
+    results = map(models, broom::tidy),
+    r2 = map(models, broom::glance)) %>% 
+  select(-strap, -models) %>%
+  unnest(c(r2, results), names_repair = "universal") %>%
+  janitor::clean_names() %>%
+  select(id, term, estimate, r_squared) %>%
+  pivot_wider(names_from = term, values_from = estimate) %>%
+  rename("b0" = "(Intercept)",
+         "b1_tmin" = "tmin") %>%
+  mutate(log_b0_b1= log((b0*b1_tmin))) %>%
+  select(r_squared, log_b0_b1)
+
+ci_calcs = boot_df %>% 
+  sapply(get_ci)
+  
+r2_dens = boot_df %>%
+  ggplot(aes(x=r_squared)) + geom_density(alpha = 0.5, fill = "blue") +
+  geom_vline(aes(xintercept=mean(r_squared)),
+            color="lightblue", linetype="solid", size=0.5, show.legend = TRUE) +
+  geom_vline(aes(xintercept=median(r_squared)),
+            color="darkblue", linetype="dashed", size=0.5, show.legend = TRUE) +
+  labs(y = "Density", x = expression(hat(r)^2)) +
+  scale_color_manual(name = '', 
+                     labels = c(mean = 'Mean', median = 'Median'),
+                     values = c(mean = 'black', median = 'black')) +
+  guides(color = guide_legend(override.aes = list(linetype = c('solid','dashed'))),
+         linetype = none)
+
+
+logb_dens = boot_df %>%
+  ggplot(aes(x=log_b0_b1)) + geom_density(alpha = 0.5, fill = "red") + 
+  geom_vline(aes(xintercept=mean(log_b0_b1)), show.legend = TRUE,
+            color="red", linetype="solid", size=0.5) +
+  geom_vline(aes(xintercept=median(log_b0_b1)), show.legend = TRUE,
+            color="darkred", linetype="dashed", size=0.5) +
+  labs(y = "Density", x = expression(log(beta[0]%*%beta[1]))) +
+  scale_color_manual(name = '', 
+                     labels = c(mean = 'Mean', median = 'Median'),
+                     values = c(mean = 'black', median = 'black')) +
+  guides(color = guide_legend(override.aes = list(linetype = c('solid','dashed'))),
+         linetype = none)
+
+print(ci_calcs)
+r2_dens + logb_dens
+
+
+```
 
